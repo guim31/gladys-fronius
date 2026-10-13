@@ -1,6 +1,6 @@
 {
   "name": "gladys-fronius",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Gladys Assistant integration for Fronius solar inverters, meters and batteries (local Solar API v1).",
   "type": "module",

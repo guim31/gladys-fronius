@@ -8,8 +8,8 @@
     "de": "Fronius-Solarwechselrichter im lokalen Netz: Produktion, Netz, Hausverbrauch und Batterie.",
     "es": "Inversores solares Fronius en la red local: producción, red, consumo de la casa y batería."
   },
-  "version": "1.0.0",
-  "docker_image": "ghcr.io/guim31/gladys-fronius:1.0.0",
+  "version": "1.0.1",
+  "docker_image": "ghcr.io/guim31/gladys-fronius:1.0.1",
   "gladys_version": ">=5.1.0",
   "cover_image": "https://raw.githubusercontent.com/guim31/gladys-fronius/main/cover.png",
   "categories": ["energy"],
