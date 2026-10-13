@@ -1,61 +1,251 @@
-# Demo Devices Template
+# Fronius
 
-This is the user documentation of the integration. Gladys re-hosts this file
-and shows a permanent **Documentation** link to it in the Configuration screen
-(in the user's language, with English as the fallback) — it is when
-configuring that the user needs it most. Keep the short onboarding hints in
-the `section` blocks of the manifest `config_schema`; put the long
-step-by-step (screenshots, troubleshooting…) here.
+Follow your **Fronius** solar installation in Gladys: solar production, house
+consumption, grid import and export, battery, inverters and meters — read **on
+your local network**, through the Fronius Solar API, with no cloud account.
 
-## What you get
+> **Developed without the hardware: feedback welcome.** This integration was
+> written and tested against real answers of Fronius systems (Symo, Primo,
+> GEN24 with and without battery) published by the Home Assistant project, but
+> not on a real installation yet. If something looks wrong, open an issue on
+> GitHub with the logs (`LOG_LEVEL=debug`).
+>
+> Not affiliated with Fronius International GmbH. Fronius, Symo, Primo, Eco,
+> GEN24 and Tauro are trademarks of their owners.
 
-Six demo devices show up after installation: a weather station (real data
-from Open-Meteo), a switch, a dimmable light, a smart plug with power
-metering, a motion sensor and a camera.
+## Overview
+
+The integration reads the **Fronius Solar API v1** (local JSON, no
+authentication) of a **Fronius Datamanager** (card or box, in a Symo, Primo,
+Eco, Galvo or IG Plus) or of a **GEN24 / GEN24 Plus / Tauro** inverter, which
+answers by itself. It creates:
+
+- one **system** device: the power flows of the whole site and the energy
+  produced;
+- one device per **inverter**: AC power, voltages and currents, energy of the
+  day, state and error code;
+- one device per **meter** (Fronius Smart Meter, S0 meter): power per phase,
+  voltages, grid import and export counters;
+- one device per **battery** (BYD Battery-Box, Fronius Solar Battery,
+  Reserva…): charge level, stored energy, temperature.
+
+It also adds a **dashboard widget**, three **scene triggers** (inverter in
+fault, battery full, battery empty) and feeds the **energy tracking** of Gladys
+with the grid import counter of the meter.
+
+## Requirements
+
+- Gladys **5.1.0** or later.
+- A Fronius Datamanager 1.0 / 2.0 (card or box), or a GEN24, GEN24 Plus or
+  Tauro inverter, connected to the **same network** as Gladys (Ethernet or
+  Wi-Fi).
+- Its **IP address**, ideally fixed: give it a DHCP reservation in your router,
+  otherwise the integration loses it when it changes.
+- On a **GEN24 / Tauro**: the Solar API is **off by default**. Open the web
+  interface of the inverter, go to **Communication > Solar API** and turn on
+  **Activate communication via Solar API**. On a Datamanager the Solar API is
+  on by default; if it was turned off, turn it back on in its web interface.
+
+The old Fronius Datalogger Web (API v0) is not supported.
 
 ## Configuration
 
-1. Open the **Configuration** tab of the integration.
-2. Set the **latitude** and **longitude** the demo weather station should
-   observe (they default to Paris), and pick your temperature unit.
-   The **refresh interval** sets how often the weather station and the
-   plug's power are read: every 5 minutes by default, every minute at most.
-3. Save: the devices appear in the **Discovery** tab, ready to be added.
+Open **Integrations > Fronius > Configuration**:
 
-The **Prefer the local connection** toggle drives the demo plug: it reports
-the channel it actually uses as a badge (local or cloud), with an orange dot
-when it runs degraded (local refused, cloud fallback).
+| Field                | What to enter                                                                                                                                                                        |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| IP address           | The IP address (or host name) of the Datamanager or of the GEN24 / Tauro inverter, e.g. `192.0.2.10`. `http://` is added for you; `https://` works too (a GEN24 may redirect to it). |
+| Refresh interval     | How often the power flows are read: 10, 15 (default), 20, 30 or 60 seconds. Inverters, meters and batteries are read once a minute.                                                  |
+| Language             | Language of the names of new devices and features, and of the inverter state texts (French by default).                                                                              |
+| Battery full at (%)  | Charge level of the **Battery full** trigger (100 by default).                                                                                                                       |
+| Battery empty at (%) | Charge level of the **Battery empty** trigger (5 by default): usually the minimum reserve set on your inverter.                                                                      |
 
-## Actions
+Save: the connection status shows whether the system answers. Then open the
+**Discovery** tab and add the devices you want. Only the devices you add are
+refreshed.
 
-- **Test the weather provider** — performs a live request to Open-Meteo and
-  shows the current temperature and humidity under the button.
-- **Identify a device** — pick one of your devices in the list and it will
-  signal itself (the demo light "blinks" in the logs).
+**Pace and load.** Fronius sets no quota on its local API, but the
+Datamanager (2.0 especially) is slow: the integration sends **one request at a
+time**, reads the power flow (one light request) at the chosen interval, and
+inverters, meters and batteries once a minute, like Home Assistant. Nothing is
+read while no device is added (except, at most once per interval, for the
+widget).
 
-## Scenes
+## Devices
 
-The integration adds its own cards to the scene editor (Gladys 5.1 or
-later), under the **Integrations** category:
+Device names come from the system (inverter custom names, meter and battery
+models) and can be renamed in Gladys. The names of the features are given once,
+when the device is created, in the language of the configuration.
 
-- **Motion detected** (trigger) — starts the scene when a demo motion sensor
-  sees something move. Optionally pick the sensor and what moved (person,
-  animal); left empty, any detection matches. The following actions can
-  read what moved with `{{triggerEvent.data.target}}`.
-- **Identify a device** (action) — makes the chosen device signal itself.
-  It returns whether the device could signal itself, so the following
-  actions can depend on it.
+### System
 
-## Dashboard
+From `GetPowerFlowRealtimeData`. Every flow is **positive**, one feature per
+direction, so a scene never has to deal with a sign:
 
-Add the **Demo status** widget to a dashboard: it shows the live
-temperature of the weather station and the power of the office plug, the
-connection the plug currently uses (orange when degraded) and the observed
-location. Its **Identify the light** button makes the demo light signal
-itself.
+| Feature             | Meaning                                                                               |
+| ------------------- | ------------------------------------------------------------------------------------- |
+| Solar production    | Power produced by the panels (W).                                                     |
+| House consumption   | Power consumed by the house (W). Needs a meter.                                       |
+| Grid import         | Power taken from the grid (W). Needs a meter.                                         |
+| Grid export         | Power fed into the grid, your surplus (W). Needs a meter.                             |
+| Battery charging    | Power going into the battery (W). With a battery only.                                |
+| Battery discharging | Power coming out of the battery (W). With a battery only.                             |
+| Production today    | Energy produced since midnight (kWh). On a GEN24, which does not count it, see below. |
+| Total production    | Lifetime production counter (kWh).                                                    |
+
+A GEN24 / Tauro only gives a lifetime counter: the integration counts the
+production of the day from it, using a reading taken while the panels produce
+nothing (before sunrise, or the evening before). **The day the integration is
+installed during the day, "Production today" stays empty until the next
+morning**: a partial count would be wrong. The count survives restarts (kept
+in `/data`).
+
+### Inverters
+
+From `GetInverterRealtimeData`: AC power (W), AC voltage (V), AC current (A),
+DC voltage and current of each input in use (MPPT 1, 2…), production of the
+day (kWh), **State** (Producing, Standby, Starting, Sleeping, Error…) and
+**Error code** ("No error" or "Code 307"…). At night a Symo or a Primo sleeps:
+its AC power is 0 W, the other values keep their last reading. The codes 306 and
+307 shown at dusk (PV voltage too low) are normal.
+
+### Meters
+
+From `GetMeterRealtimeData`. What a meter gives depends on where it sits:
+
+- **at the feed-in point** (the usual Smart Meter): the grid exchange
+  (positive when importing, negative when exporting), the power of each phase,
+  the voltage of each phase, and two counters: **Energy imported (meter)** and
+  **Energy exported (meter)**, in kWh;
+- **on the consumption path**: the house consumption (positive) and, for a
+  three-phase meter, phases and voltages;
+- elsewhere (sub-load, external generator): its power, as the meter signs it.
+
+### Batteries
+
+From `GetStorageRealtimeData`: **Charge level** (%), **Stored energy** (kWh,
+from the charge level and the usable capacity) and **Cell temperature** (°C).
+The charge and discharge powers are on the system device; the usable capacity
+shows in the widget.
+
+## Energy tracking
+
+The **Energy imported (meter)** counter of the feed-in meter is published as
+an energy **index**: when you add the meter device, Gladys creates its
+"consumption" and "cost" features and computes the energy taken from the grid
+every half hour, with the cost of your contract (Energy settings of Gladys:
+choose this meter as the main electric meter if it is the one of your supply).
+It is what your supplier bills: the solar energy you consume yourself is free
+and is not in it.
+
+The other counters never count as consumption: **Energy exported** is a grid
+export index, **Total production** a production index. Gladys 5.2.1 keeps
+their history but does not yet compute a production per half hour for an
+external integration: the graphs of the Energy screens show the consumption.
+
+## Widget
+
+Edit a dashboard and add the **Fronius** widget. It shows, in one card:
+
+- tiles **Solar**, **House**, **From the grid**, **To the grid**, **Battery**
+  (charge level) and **Today** (production of the day), live;
+- a graph of the production and consumption of the last 24 hours;
+- a list: self-consumption and self-sufficiency (%), battery state and mode,
+  state of each inverter, production of the year (Datamanager) and lifetime,
+  time of the last reading.
+
+The widget never makes the Datamanager work more: it shows the last reading.
+Tiles a system cannot measure (no meter, no battery) are left out.
+
+## Scene triggers
+
+Under **Integrations** in the scene editor:
+
+- **Fronius inverter in fault**: an inverter switched to the error state. Pick
+  an inverter or leave empty for any. Variables: `{{triggerEvent.data.inverter}}`
+  (name) and `{{triggerEvent.data.error_code}}`. Fires once per fault, at most
+  every 10 minutes per inverter; the dusk codes (306, 307) are not faults.
+- **Fronius battery full**: the charge level reached the "full" level of the
+  configuration. Fires again only after the level dropped 5 points.
+- **Fronius battery empty**: the charge level fell to the "empty" level.
+  Fires again only after the level rose 5 points. Variables of both:
+  `{{triggerEvent.data.battery}}` and `{{triggerEvent.data.level}}`.
+
+No trigger fires on the first reading after a start: only changes count.
+
+A **solar surplus** needs no trigger of its own: use the trigger **Device
+state change** on the **Grid export** feature of the system device, with the
+threshold ("above 1500 W") and, if you want, a duration.
+
+## Action
+
+**Test the connection** (Configuration tab) reads the whole system and lists
+what it found: Datamanager or GEN24, number of inverters, meters and batteries.
+The devices found are published in the Discovery tab.
+
+## Scene examples
+
+- **Use the surplus**: _Device state change_ — "Grid export" of the
+  Fronius system above 1500 W for 10 minutes → turn on the water heater plug.
+  A second scene turns it off when "Grid import" goes above 500 W.
+- **Be warned of a fault**: _Fronius inverter in fault_ → send a message
+  "Inverter {{triggerEvent.data.inverter}} in fault, code
+  {{triggerEvent.data.error_code}}".
+- **Battery full at noon**: _Fronius battery full_ → start the dishwasher
+  plug, or the car charging station.
+- **Battery empty in the evening**: _Fronius battery empty_ → send a message,
+  or lower the heating setpoint by one degree.
 
 ## Troubleshooting
 
-The integration logs everything it does: check the integration logs from the
-Gladys UI (or `docker logs` on the host) with `LOG_LEVEL=debug` for the full
-detail.
+- **"The Fronius system does not answer"**: check the IP address (it may have
+  changed: reserve it in your router), that Gladys and the Fronius system are
+  on the same network, and on a GEN24 that the Solar API is on
+  (Communication > Solar API). Test in a browser:
+  `http://<ip>/solar_api/v1/GetPowerFlowRealtimeData.fcgi` must show JSON.
+- **A GEN24 redirects to https**: since firmware 1.35.4-1. The integration
+  follows the redirect and accepts the self-signed certificate of the inverter.
+- **No device in the Discovery tab**: press **Test the connection**; its
+  message says what the system answered.
+- **The values do not change**: only the devices added to Gladys are
+  refreshed. Check the logs of the integration (Supervision), and set
+  `LOG_LEVEL=debug` to see each reading.
+- **"Production today" is empty on a GEN24**: normal the day of the
+  installation (see System above); it starts the next morning.
+- **At night**: inverters sleep (state Sleeping or Starting, 0 W); a
+  Datamanager switched off at night is reported once in the logs and the
+  devices show as unreachable until the morning.
+- **A device has new features after an update**: Gladys proposes **Update**
+  in the Discovery tab; the history is kept.
+
+## Limits
+
+- Developed without the hardware (see the top of this page): real-life
+  feedback is welcome.
+- Read only: nothing is driven (no battery control, no power limit, no
+  Modbus). An inverter or a battery is not something a scene should switch by
+  mistake.
+- One Fronius system per integration (one IP address). A Datamanager sees all
+  the inverters of its Solar Net.
+- No automatic discovery: the Datamanager and the GEN24 do not announce
+  themselves in mDNS or SSDP (Home Assistant finds them by their MAC address in
+  DHCP, which Gladys does not relay to an integration).
+- No AC frequency (Gladys has no unit for hertz), no Ohmpilot, no reactive or
+  apparent power.
+- Self-consumption and self-sufficiency are shown in the widget only: Gladys
+  has no feature type for an energy ratio.
+- The counters of a meter on the consumption path are not published (their
+  direction is not documented well enough to feed the energy tracking).
+- The triggers fire on changes only, never on the first reading after a start.
+
+## Data and network
+
+- The integration only talks to the address you entered, on your local
+  network, over HTTP (or HTTPS for a GEN24 that redirects). No cloud, no
+  account, no data sent outside.
+- The Solar API has no password: the integration stores no secret. If an
+  address with a user name and password is typed, they are dropped.
+- It keeps two small files in its `/data` volume: the list of devices of your
+  system (serial numbers, so the devices stay after a restart, even when the
+  Datamanager is off) and, for a GEN24, the baseline of the production of the
+  day.

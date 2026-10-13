@@ -5,9 +5,11 @@ contributors.
 
 ## What this is
 
-A Gladys Assistant **external integration**: a Node.js service (Node 22+, ESM,
-no build step) that runs in its own sandboxed Docker container and talks to
-Gladys through
+A Gladys Assistant **external integration** for **Fronius** solar
+installations (Datamanager, GEN24 / Tauro inverters, Smart Meters, batteries),
+read on the local network through the Fronius Solar API v1: a Node.js service
+(Node 22+, ESM, no build step) that runs in its own sandboxed Docker container
+and talks to Gladys through
 [`@gladysassistant/integration-sdk`](https://github.com/GladysAssistant/integration-sdk-js),
 its only runtime dependency. It started from the official JavaScript template.
 
@@ -17,11 +19,11 @@ its only runtime dependency. It started from the official JavaScript template.
 npm install
 npm test                                  # node --test, the built-in runner
 node --test test/devices.test.js          # one file
-node --test --test-name-pattern "plug"    # tests whose name matches
+node --test --test-name-pattern "GEN24"   # tests whose name matches
 npm run lint                              # ESLint
 npm run format:check                      # Prettier, as the CI runs it
 npm run format                            # Prettier, fix in place
-npx github:GladysAssistant/integration-store .   # store admission checks
+npx github:GladysAssistant/integration-store --skip-image-check .   # store checks
 ```
 
 The CI (`.github/workflows/ci.yml`) runs `format:check`, `lint` and `test` on
@@ -31,16 +33,25 @@ pushing.
 ## Architecture
 
 ```
-index.js                          SDK wiring only: handlers registered before connect()
-src/devices/index.js              registry of the device blueprints + dispatch helpers
-src/devices/<type>.js             one device type per file (buildDevice, onPoll, onSetValue...)
-src/scenes.js                     scene action handlers (manifest `scene_actions`)
-src/widgets.js                    dashboard widget handlers (manifest `widgets`)
+index.js                          SDK wiring only: createApp + connect()
+src/app.js                        handlers, refresh cycle (own timer), reachability, widget, action
+src/fronius/client.js             Solar API HTTP client: one request at a time, redirects, status codes
+src/fronius/parse.js              pure parsers of the Solar API answers (API units and signs)
+src/fronius/service.js            inventory (discover, merged, kept in /data) + snapshot (refresh)
+src/devices/index.js              buildDevices / buildStates / producedToday
+src/devices/<type>.js             system, inverter, meter, battery: features + states
+src/devices/helpers.js            feature builder, category/type couples, display bounds
+src/dayEnergy.js                  production of the day counted from a lifetime counter (GEN24)
+src/triggers.js                   scene triggers (inverter_error, battery_full, battery_empty)
+src/widgets.js                    the "energy_flow" widget content (pure builder)
+src/i18n.js                       every user-visible text, en / fr / de / es
 src/config.js                     DEFAULT_CONFIG (mirrors the manifest defaults) + normalization
-src/weather.js                    example driver (Open-Meteo)
-gladys-assistant-integration.json manifest: name, config_schema, actions, image...
-docs/en.md, docs/fr.md            user documentation, re-hosted by Gladys (mandatory)
+src/store.js                      JSON files under /data (atomic writes)
+gladys-assistant-integration.json manifest: name, config_schema, actions, triggers, widget...
+docs/{en,fr,de,es}.md             user documentation, re-hosted by Gladys, same sections
 test/                             node --test, against the SDK's fake Gladys (integration-sdk/testing)
+test/helpers/                     fake Fronius transport (fixtures), world (app + fake Gladys + clock)
+test/fixtures/fronius/            real Solar API answers (Home Assistant tests, Apache 2.0)
 .github/scripts/release.mjs       release helpers (manifest bump, changelog), tested in test/
 ```
 
@@ -70,10 +81,72 @@ test/                             node --test, against the SDK's fake Gladys (in
   `type: "provider"`: 5.1.0). `test/manifest.test.js` ties the manifest to the
   code (defaults, action, scene and widget handlers): change both sides
   together.
-- **User-facing text** is bilingual (English and French): action messages,
-  manifest texts, and `docs/en.md` / `docs/fr.md`, kept in sync.
+- **User-facing text** exists in four languages (English, French, German with
+  "du", Spanish with "usted"): manifest texts, `src/i18n.js` (the only source
+  file allowed to hold texts), and `docs/{en,fr,de,es}.md`, kept in sync.
+  `test/i18n.test.js` enforces it.
 - **Style.** Prettier formats, ESLint catches mistakes. Comments explain why,
-  in English. Tests never touch the network.
+  in English. Tests never touch the network (one client test uses a server on
+  the loopback interface).
+
+## Fronius: what the code relies on
+
+Read in pyfronius (MIT), in the Home Assistant `fronius` integration and its
+recorded answers (`test/fixtures/fronius/`), and in the Solar API V1 document.
+**Never checked on a real installation** (developed without the hardware).
+
+- **Endpoints** (`src/fronius/client.js`): `GetLoggerInfo` (Datamanager only;
+  a GEN24 answers status 11), `GetInverterInfo`, `GetPowerFlowRealtimeData`,
+  `GetInverterRealtimeData?Scope=Device&DataCollection=CommonInverterData`,
+  `GetMeterRealtimeData?Scope=System`, `GetStorageRealtimeData?Scope=System`.
+  `Head.Status.Code` ≠ 0 is an error: 11 / 255 (and HTTP 404) "not
+  supported", 12 "device not available" (an inverter asleep at night), 8
+  "LNRequestTimeout" (flaky Datamanager → inverter link, ~1 % of the requests
+  on a Symo per HA: retried once).
+- **System identity**: the logger `UniqueID`, or on a GEN24 / Tauro (no
+  logger) the `UniqueID` of the first inverter, as HA does. Meters and
+  batteries: their serial; `"n.a."` (S0 meter) is no serial →
+  `<system>-meter-<index>`. Never change these platform ids.
+- **Signs of the power flow**: `P_PV` > 0 production, `P_Load` < 0 the house
+  consuming, `P_Grid` > 0 import / < 0 export, `P_Akku` > 0 discharge / < 0
+  charge. Published as positive values, one feature per direction.
+- **Nulls are normal**: at night `P_PV` is null and a Symo has no AC values
+  (status 3, error 307 at dusk: not a fault); a GEN24 has `E_Day` / `E_Year`
+  / `DAY_ENERGY` null (counted by `src/dayEnergy.js`); no meter → `P_Grid`
+  and `P_Load` null; no battery → `P_Akku` null. A capability needs a
+  non-null reading, and once seen it stays (`mergeInventory`).
+- **Meter location** (`Meter_Location_Current`): 0 feed-in point (grid: power
+  positive = import, `EnergyReal_WAC_Plus_Absolute` = imported,
+  `Minus_Absolute` = exported), 1 consumption path (power negative = the house
+  consuming), 3 generator, 4 battery, 256-511 sub-loads. Newer GEN24 firmwares
+  also send `SMARTMETER_*` fields (read as fallbacks, from pyfronius).
+- **Energy types**: the grid import counter is the **only**
+  `energy-sensor/index` (the core derives `_consumption` and `_cost` from it:
+  what the supplier bills). Export = `grid-sensor/output-index`, lifetime
+  production = `energy-production-sensor/index` (no half-hourly production
+  for external integrations in 5.2.1: nothing creates the
+  `thirty-minutes-production` feature), day production =
+  `energy-production-sensor/daily-production` (read by no pipeline).
+  `test/devices.test.js` pins that no other feature is a consumption index.
+- **Inverter status codes**: 0-6 start-up, 7 running, 8 standby, 9
+  bootloading, 10 error, 11 idle, 12 ready, 13 sleeping. A fault is status 10
+  or a GEN24 `InverterState` matching error/fault/failure.
+- **GEN24 HTTPS**: firmware 1.35.4-1 redirects http → https with a
+  self-signed certificate (home-assistant/core#138881): redirects followed,
+  certificate not checked (no secret sent).
+- **GEN24 Solar API off by default**: web interface, Communication > Solar
+  API. Without it the inverter answers nothing useful; the connection message
+  says so.
+- **No mediated discovery**: Fronius devices announce nothing in mDNS / SSDP
+  (HA uses their DHCP MAC prefix 00:03:AC, which Gladys does not relay).
+- **Pace**: power flow at the configured interval (10–60 s), per-device
+  endpoints once a minute, one request at a time; nothing read without an
+  added device (except for the widget, once per interval at most).
+- **Design choices**: self-consumption and autonomy (%) only in the widget
+  (no couple for a ratio); no frequency (no hertz unit); counters of a
+  consumption-path meter not published (direction not documented enough); no
+  "solar surplus" trigger (the core's device-state trigger on "Grid export"
+  has threshold and duration); no scene action (nothing to drive).
 
 ---
 
@@ -169,6 +242,10 @@ code de ce dépôt. Compléter ce fichier quand un nouveau piège est découvert
   avec identifiants. Un test vérifie qu'un cycle normal n'écrit rien en info.
 - **Heartbeat** : republier au moins toutes les 12 h une valeur qui ne change pas, sinon le front
   affiche « Pas de valeur récente » au-delà de 48 h.
+- `gladys.requestWidgetRefresh(key)` est **synchrone** (renvoie `undefined`) : un `.catch()` dessus lève
+  un `TypeError` et fait échouer le handler (relevé sur gladys-fronius). L'entourer d'un `try`.
+- `publishChangedStates(..., { heartbeat })` date les valeurs avec `Date.now()` du SDK, pas avec l'horloge
+  de l'intégration : un test du heartbeat doit simuler `Date` (`t.mock.timers.enable({ apis: ['Date'] })`).
 
 **Widgets, déclencheurs, actions de scène (SDK ≥ 0.14, Gladys ≥ 5.1)**
 
